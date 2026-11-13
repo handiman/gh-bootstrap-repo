@@ -6,12 +6,13 @@
 # Safe to re-run: every step is idempotent (the ruleset is updated in place).
 #
 # Usage:
-#   gh bootstrap-repo <owner/repo> [--checks "build,test"] [--no-codeql] [--no-actions-allowlist] [--no-require-signed]
+#   gh bootstrap-repo <owner/repo> [--checks "build,test"] [--no-codeql] [--no-actions-allowlist] [--no-require-signed] [--retention-days N]
 #
 #   --checks               Comma-separated status checks required on the default branch
 #                          (job names as they appear in the PR checks list).
 #   --no-codeql            Skip CodeQL default setup (use if the repo has its own CodeQL workflow).
 #   --no-actions-allowlist Don't restrict Actions to GitHub-owned and verified creators.
+#   --retention-days N     Artifact and log retention for Actions (default 7).
 #   --no-require-signed    Don't require signed commits on the default branch.
 #                          (Squash merges made on github.com are signed by GitHub.)
 #
@@ -28,9 +29,10 @@ CHECKS=""
 CODEQL=1
 ACTIONS_ALLOWLIST=1
 REQUIRE_SIGNED=1
+RETENTION_DAYS=7
 RULESET_NAME="secure-default-branch"
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --no-codeql) CODEQL=0; shift ;;
     --no-actions-allowlist) ACTIONS_ALLOWLIST=0; shift ;;
     --no-require-signed) REQUIRE_SIGNED=0; shift ;;
+    --retention-days) RETENTION_DAYS="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     -*) echo "Unknown option: $1" >&2; usage ;;
     *) REPO="$1"; shift ;;
@@ -45,6 +48,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$REPO" ]] && usage
+[[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || { echo "--retention-days must be a number" >&2; exit 1; }
 command -v gh >/dev/null || { echo "gh is not installed" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh is not authenticated (gh auth login)" >&2; exit 1; }
 
@@ -122,17 +126,27 @@ step "GITHUB_TOKEN read-only by default, cannot approve PRs" \
   gh api -X PUT "repos/$REPO/actions/permissions/workflow" --input - \
     <<<'{"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}'
 
-if [[ $ACTIONS_ALLOWLIST -eq 1 ]]; then
-  # shellcheck disable=SC2329 # invoked via step
-  allow_selected_actions() {
-    gh api -X PUT "repos/$REPO/actions/permissions" --input - <<<'{"enabled":true,"allowed_actions":"selected"}' &&
+ALLOWED_ACTIONS=all; [[ $ACTIONS_ALLOWLIST -eq 1 ]] && ALLOWED_ACTIONS=selected
+# shellcheck disable=SC2329 # invoked via step
+actions_permissions() {
+  gh api -X PUT "repos/$REPO/actions/permissions" --input - \
+    <<<"{\"enabled\":true,\"allowed_actions\":\"$ALLOWED_ACTIONS\",\"sha_pinning_required\":true}" || return 1
+  if [[ $ALLOWED_ACTIONS == selected ]]; then
     gh api -X PUT "repos/$REPO/actions/permissions/selected-actions" --input - \
       <<<'{"github_owned_allowed":true,"verified_allowed":true,"patterns_allowed":[]}'
-  }
-  step "Allow only GitHub-owned and verified-creator actions" allow_selected_actions
+  fi
+}
+if [[ $ACTIONS_ALLOWLIST -eq 1 ]]; then
+  step "Actions pinned to full-length SHA, only GitHub-owned and verified creators" actions_permissions
 else
-  echo "  - Actions allowlist (disabled with --no-actions-allowlist)"
+  step "Actions pinned to full-length SHA" actions_permissions
 fi
+
+step "Require approval for workflows from all external contributors" \
+  gh api -X PUT "repos/$REPO/actions/permissions/fork-pr-contributor-approval" -f approval_policy=all_external_contributors
+
+step "Artifact and log retention: $RETENTION_DAYS days" \
+  gh api -X PUT "repos/$REPO/actions/permissions/artifact-and-log-retention" -F days="$RETENTION_DAYS"
 
 # --- Default branch ruleset ---------------------------------------------------
 echo "Default branch"

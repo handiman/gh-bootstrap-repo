@@ -11,7 +11,7 @@ gh extension install handiman/gh-bootstrap-repo
 ## Usage
 
 ```sh
-gh bootstrap-repo <owner/repo> [--checks "build,test"] [--no-codeql] [--no-actions-allowlist] [--no-require-signed]
+gh bootstrap-repo <owner/repo> [--checks "build,test"] [--no-codeql] [--no-actions-allowlist] [--no-require-signed] [--retention-days N]
 ```
 
 Typical flow:
@@ -38,7 +38,10 @@ Safe to re-run. Steps the repo's plan or visibility doesn't support are reported
 
 **GitHub Actions**
 - `GITHUB_TOKEN` read-only by default, cannot approve PRs
+- Actions must be pinned to a full-length commit SHA
 - Only GitHub-owned and verified-creator actions (`--no-actions-allowlist` to skip)
+- Approval required for workflow runs from all external contributors
+- Artifact and log retention 7 days (`--retention-days N`)
 
 **Default branch ruleset** (`secure-default-branch`)
 - No deletion, no force push
