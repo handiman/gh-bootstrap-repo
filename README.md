@@ -49,7 +49,7 @@ Safe to re-run. Steps the repo's plan or visibility doesn't support are reported
 
 ## Requirements
 
-`gh` (authenticated, admin on the target repo) and `jq`.
+`gh` (authenticated, admin on the target repo). Nothing else.
 
 ## License
 

@@ -15,7 +15,7 @@
 #   --no-require-signed    Don't require signed commits on the default branch.
 #                          (Squash merges made on github.com are signed by GitHub.)
 #
-# Requires: gh (authenticated, admin on the repo), jq.
+# Requires: gh (authenticated, admin on the repo). Nothing else.
 #
 # Note: on private repos some features need a paid plan (rulesets on personal
 # accounts need Pro; secret scanning/code scanning need GitHub Secret/Code
@@ -46,7 +46,6 @@ done
 
 [[ -z "$REPO" ]] && usage
 command -v gh >/dev/null || { echo "gh is not installed" >&2; exit 1; }
-command -v jq >/dev/null || { echo "jq is not installed" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh is not authenticated (gh auth login)" >&2; exit 1; }
 
 OK=0; SKIPPED=0
@@ -59,16 +58,15 @@ step() {
     printf '  \e[32m✓\e[0m %s\n' "$desc"; OK=$((OK+1))
   else
     local msg
-    msg=$(jq -r '.message? // empty' <<<"$out" 2>/dev/null | head -1)
-    [[ -z "$msg" ]] && msg=$(tail -1 <<<"$out")
+    # gh prints "gh: <message> (HTTP nnn)" as the last line on API errors
+    msg=$(tail -1 <<<"$out"); msg=${msg#gh: }
     printf '  \e[33m⚠\e[0m %s — skipped: %s\n' "$desc" "$msg"; SKIPPED=$((SKIPPED+1))
   fi
 }
 
-REPO_JSON=$(gh api "repos/$REPO") || { echo "Cannot read $REPO" >&2; exit 1; }
-VISIBILITY=$(jq -r .visibility <<<"$REPO_JSON")
-DEFAULT_BRANCH=$(jq -r .default_branch <<<"$REPO_JSON")
-IS_ADMIN=$(jq -r .permissions.admin <<<"$REPO_JSON")
+REPO_INFO=$(gh api "repos/$REPO" --jq '[.visibility, .default_branch, .permissions.admin] | @tsv') \
+  || { echo "Cannot read $REPO" >&2; exit 1; }
+IFS=$'\t' read -r VISIBILITY DEFAULT_BRANCH IS_ADMIN <<<"$REPO_INFO"
 
 [[ "$IS_ADMIN" != "true" ]] && { echo "You need admin rights on $REPO" >&2; exit 1; }
 
@@ -138,43 +136,55 @@ fi
 
 # --- Default branch ruleset ---------------------------------------------------
 echo "Default branch"
-STATUS_RULE=""
+json_escape() { local v=${1//\\/\\\\}; printf '%s' "${v//\"/\\\"}"; }
+
+EXTRA_RULES=""
+if [[ $REQUIRE_SIGNED -eq 1 ]]; then
+  EXTRA_RULES+=',
+    { "type": "required_signatures" }'
+fi
 if [[ -n "$CHECKS" ]]; then
-  STATUS_RULE=$(jq -nc --arg c "$CHECKS" '{
-    type: "required_status_checks",
-    parameters: {
-      strict_required_status_checks_policy: true,
-      required_status_checks: ($c | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | map({context: .}))
-    }}')
+  CONTEXTS=""
+  IFS=',' read -ra CHECK_LIST <<<"$CHECKS"
+  for c in "${CHECK_LIST[@]}"; do
+    c="${c#"${c%%[![:space:]]*}"}"; c="${c%"${c##*[![:space:]]}"}"   # trim
+    [[ -z "$c" ]] && continue
+    CONTEXTS+="${CONTEXTS:+, }{ \"context\": \"$(json_escape "$c")\" }"
+  done
+  if [[ -n "$CONTEXTS" ]]; then
+    EXTRA_RULES+=',
+    { "type": "required_status_checks",
+      "parameters": { "strict_required_status_checks_policy": true, "required_status_checks": [ '"$CONTEXTS"' ] } }'
+  fi
 fi
 
-RULESET=$(jq -nc --arg name "$RULESET_NAME" --argjson status "${STATUS_RULE:-null}" --argjson signed "$REQUIRE_SIGNED" '{
-  name: $name,
-  target: "branch",
-  enforcement: "active",
-  conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
-  bypass_actors: [ { actor_type: "RepositoryRole", actor_id: 5, bypass_mode: "pull_request" } ],
-  rules: ([
-    { type: "deletion" },
-    { type: "non_fast_forward" },
-    { type: "pull_request",
-      parameters: {
-        required_approving_review_count: 0,
-        dismiss_stale_reviews_on_push: true,
-        require_code_owner_review: false,
-        require_last_push_approval: false,
-        required_review_thread_resolution: true,
-        allowed_merge_methods: ["squash"]
-      } }
+RULESET=$(cat <<EOF2
+{
+  "name": "$RULESET_NAME",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "bypass_actors": [ { "actor_type": "RepositoryRole", "actor_id": 5, "bypass_mode": "pull_request" } ],
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": true,
+        "allowed_merge_methods": ["squash"]
+      } }$EXTRA_RULES
   ]
-  + (if $signed == 1 then [{ type: "required_signatures" }] else [] end)
-  + (if $status then [$status] else [] end))
-}')
+}
+EOF2
+)
 
 SIGNED_DESC=""; [[ $REQUIRE_SIGNED -eq 1 ]] && SIGNED_DESC=", signed commits"
 
-EXISTING_ID=$(gh api "repos/$REPO/rulesets" 2>/dev/null \
-  | jq -r --arg n "$RULESET_NAME" '.[]? | select(.name == $n) | .id' | head -1)
+EXISTING_ID=$(gh api "repos/$REPO/rulesets" --jq ".[] | select(.name == \"$RULESET_NAME\") | .id" 2>/dev/null | head -1)
 
 if [[ -n "$EXISTING_ID" ]]; then
   step "Update ruleset '$RULESET_NAME' (no deletion, no force push, squash PR required, admin bypass via PR${SIGNED_DESC}${CHECKS:+, checks: $CHECKS})" \
