@@ -210,8 +210,8 @@ fi
 
 echo
 echo "Done: $OK applied, $SKIPPED skipped."
+[[ $SKIPPED -gt 0 ]] && echo "Skipped steps usually mean the feature isn't available for this repo's plan or visibility."
 echo
 echo "Manual step (no API for this yet):"
 echo "  - Dependabot malware alerts: https://github.com/$REPO/settings/security_analysis"
-[[ $SKIPPED -gt 0 ]] && echo "Skipped steps usually mean the feature isn't available for this repo's plan or visibility."
 exit 0
