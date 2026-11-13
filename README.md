@@ -23,6 +23,8 @@ gh bootstrap-repo handiman/my-repo
 
 Safe to re-run. Steps the repo's plan or visibility doesn't support are reported as skipped.
 
+**Not covered:** Dependabot malware alerts has no REST API toggle on repository level yet. The script prints a link to the settings page so you can switch it on by hand.
+
 ## What it sets
 
 **Merging**
